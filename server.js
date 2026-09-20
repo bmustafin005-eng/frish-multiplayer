@@ -1,99 +1,45 @@
 const express=require('express');
 const http=require('http');
 const {Server}=require('socket.io');
-
-const app=express();
-const server=http.createServer(app);
-const io=new Server(server);
-
-const INDEX_HTML = "<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>ФРИШ Multiplayer Test v0.3</title><style>\nbody{font-family:Arial,sans-serif;background:#143d2b;color:#fff;margin:0;padding:24px}main{max-width:760px;margin:auto}.card{background:#f5efe2;color:#151515;border-radius:18px;padding:20px;margin:14px 0}button,input{font-size:16px;padding:12px;border-radius:10px;border:0;margin:5px}button{cursor:pointer}.seats{display:grid;grid-template-columns:1fr 1fr;gap:10px}.seat{background:#fff;color:#111;padding:14px;border-radius:12px}.muted{opacity:.55}.code{font-size:28px;font-weight:700;letter-spacing:2px}#log{white-space:pre-line;min-height:80px}</style></head><body><main><h1>ФРИШ · Multiplayer Test</h1>\n<div class=\"card\" id=\"gate\"><input id=\"name\" placeholder=\"Ваше имя\"><br><button id=\"create\">Создать комнату</button><input id=\"codeIn\" placeholder=\"FRISH-0000\"><button id=\"join\">Войти</button><p id=\"err\"></p></div>\n<div class=\"card\" id=\"room\" hidden><div>Код комнаты</div><div class=\"code\" id=\"code\"></div><p>Передайте этот код другим игрокам. Можно подключить от 1 до 3 человек.</p><div class=\"seats\" id=\"seats\"></div><button id=\"start\">НАЧАТЬ ТЕСТ</button></div>\n<div class=\"card\" id=\"status\" hidden><b>События</b><div id=\"log\"></div><input id=\"msg\" placeholder=\"Сообщение\"><button id=\"send\">Отправить</button></div>\n<script src=\"/socket.io/socket.io.js\"></script><script>\nconst s=io(),$=q=>document.querySelector(q);let meHost=false;\n$('#create').onclick=()=>{meHost=true;s.emit('create',{name:$('#name').value})};$('#join').onclick=()=>s.emit('join',{code:$('#codeIn').value,name:$('#name').value});$('#start').onclick=()=>s.emit('start');$('#send').onclick=()=>{if($('#msg').value){s.emit('chat',$('#msg').value);$('#msg').value=''}};\ns.on('err',x=>$('#err').textContent=x);s.on('room',r=>{$('#gate').hidden=true;$('#room').hidden=false;$('#status').hidden=false;$('#code').textContent=r.code;$('#start').style.display=meHost&&!r.started?'inline-block':'none';$('#seats').innerHTML=r.players.map((p,i)=>`<div class=\"seat ${p&&!p.connected?'muted':''}\">${i+1}. ${p?(p.name+(p.bot?' · БОТ':'')+(p.connected?'':' · ОТКЛЮЧЕН')):'свободно'}</div>`).join('');$('#log').textContent=r.log.join('\\n')});s.on('game',g=>alert(g.message));\n</script></main></body></html>\n";
-
-app.get('/',(req,res)=>res.type('html').send(INDEX_HTML));
-app.get('/health',(req,res)=>res.json({ok:true,service:'FRISH Multiplayer Test'}));
-
-const rooms=new Map();
-const names=['ИГОРЬ','ДЖАМАЛ','ВАЛЕК','АЛЕКСЕЙ'];
-
-function code(){
-  let c;
-  do{ c='FRISH-'+Math.floor(1000+Math.random()*9000); }while(rooms.has(c));
-  return c;
-}
-function roomView(r){
-  return {
-    code:r.code,
-    players:r.players.map((p,i)=>p?{name:p.name,bot:p.bot,connected:p.connected,seat:i}:null),
-    started:r.started,
-    log:r.log.slice(-12)
-  };
-}
-function emit(r){ io.to(r.code).emit('room',roomView(r)); }
-function fillBots(r){
-  for(let i=0;i<4;i++){
-    if(!r.players[i]) r.players[i]={name:names[i],bot:true,connected:true};
-  }
-}
-
-io.on('connection',s=>{
-  s.on('create',({name})=>{
-    const c=code();
-    const r={
-      code:c,
-      players:[{id:s.id,name:name||'ИГОРЬ',bot:false,connected:true},null,null,null],
-      started:false,
-      log:['Комната создана']
-    };
-    rooms.set(c,r);
-    s.join(c);
-    s.data={code:c,seat:0};
-    emit(r);
-  });
-
-  s.on('join',({code:c,name})=>{
-    c=(c||'').toUpperCase().trim();
-    const r=rooms.get(c);
-    if(!r) return s.emit('err','Комната не найдена');
-    if(r.started) return s.emit('err','Игра уже началась');
-    const seat=r.players.findIndex(x=>!x);
-    if(seat<0) return s.emit('err','Комната заполнена');
-    r.players[seat]={id:s.id,name:name||names[seat],bot:false,connected:true};
-    s.join(c);
-    s.data={code:c,seat};
-    r.log.push(`${r.players[seat].name} подключился`);
-    emit(r);
-  });
-
-  s.on('start',()=>{
-    const r=rooms.get(s.data?.code);
-    if(!r||s.data.seat!==0) return;
-    fillBots(r);
-    r.started=true;
-    r.log.push('Тестовая партия запущена. Свободные места заняли боты.');
-    emit(r);
-    io.to(r.code).emit('game',{
-      message:'Мультиплеерная комната работает. Следующий этап — подключение полного движка правил ФРИШ.'
-    });
-  });
-
-  s.on('chat',msg=>{
-    const r=rooms.get(s.data?.code);
-    if(!r) return;
-    const p=r.players[s.data.seat];
-    r.log.push(`${p?.name||'Игрок'}: ${String(msg).slice(0,120)}`);
-    emit(r);
-  });
-
-  s.on('disconnect',()=>{
-    const r=rooms.get(s.data?.code);
-    if(!r) return;
-    const p=r.players[s.data.seat];
-    if(p&&!p.bot){
-      p.connected=false;
-      r.log.push(`${p.name} отключился`);
-      emit(r);
-    }
-  });
-});
-
+const app=express(), server=http.createServer(app), io=new Server(server);
 const PORT=process.env.PORT||3000;
-server.listen(PORT,()=>console.log('FRISH multiplayer on '+PORT));
+const rooms=new Map();
+const NAMES=['ИГОРЬ','ДЖАМАЛ','ВАЛЕК','АЛЕКСЕЙ'];
+const RANKS=['A','K','Q','J','10','9','8','7','6','5','4','3','2'];
+const SUITS=['♥','♣','♦','♠'];
+const isJ=c=>c&&c.rank==='JOKER';
+function deck(){let a=[],id=1;for(let copy=1;copy<=2;copy++)for(const suit of SUITS)for(const rank of RANKS)a.push({id:id++,rank,suit,copy});a.push({id:id++,rank:'JOKER',suit:'R',copy:1},{id:id++,rank:'JOKER',suit:'B',copy:2});for(let i=a.length-1;i;i--){let j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]]}return a}
+function code(){let s;do{s='FRISH-'+Math.floor(1000+Math.random()*9000)}while(rooms.has(s));return s}
+function newRoom(hostName,sid){return {code:code(),players:[{name:hostName||'Игорь',sid,bot:false},null,null,null],started:false,dealNo:1,mult:2,dealer:0,cutter:3,phase:'lobby',stock:[],svetka:null,discard:[],hands:[[],[],[],[]],melds:[],turn:0,drawn:false,log:['Комната создана'],cutTimer:null}}
+function cardText(c){return isJ(c)?'J':c.rank+c.suit}
+function publicState(r,viewer){return {code:r.code,players:r.players.map((p,i)=>p?{name:p.name,bot:p.bot,count:r.hands[i]?.length||0}:null),started:r.started,dealNo:r.dealNo,mult:r.mult,dealer:r.dealer,cutter:r.cutter,phase:r.phase,svetka:r.svetka,discard:r.discard.at(-1)||null,stockCount:r.stock.length,melds:r.melds,turn:r.turn,drawn:r.drawn,myIndex:viewer,myHand:viewer>=0?r.hands[viewer]:[],log:r.log.slice(-8)}}
+function emit(r){r.players.forEach((p,i)=>{if(p&&!p.bot&&p.sid)io.to(p.sid).emit('state',publicState(r,i))})}
+function addLog(r,s){r.log.push(s);if(r.log.length>80)r.log.shift()}
+function startGame(r){for(let i=0;i<4;i++)if(!r.players[i])r.players[i]={name:NAMES[i],sid:null,bot:true};r.started=true;startDeal(r)}
+function startDeal(r){clearTimeout(r.cutTimer);r.dealer=(r.dealNo-1)%4;r.cutter=(r.dealer+3)%4;r.phase='cut';r.stock=deck();r.svetka=null;r.discard=[];r.hands=[[],[],[],[]];r.melds=[];r.turn=r.dealer;r.drawn=false;addLog(r,`${r.players[r.cutter].name} снимает колоду`);emit(r);r.cutTimer=setTimeout(()=>completeCut(r,Math.floor(r.stock.length/2),true),7000);if(r.players[r.cutter].bot)setTimeout(()=>completeCut(r,Math.floor(r.stock.length*(.35+Math.random()*.3)),true),900)}
+function completeCut(r,pos,auto=false){if(r.phase!=='cut')return;clearTimeout(r.cutTimer);pos=Math.max(10,Math.min(r.stock.length-10,Number(pos)||Math.floor(r.stock.length/2)));const cut=r.stock.splice(0,pos);r.svetka=cut.pop();r.stock=[...r.stock,...cut];r.phase='deal';addLog(r,`${r.players[r.cutter].name} ${auto?'снял автоматически':'снял колоду'}. Светка: ${cardText(r.svetka)}`);for(let i=0;i<4;i++){let n=i===r.dealer?15:14;for(let k=0;k<n;k++)r.hands[i].push(r.stock.pop())}r.phase='turn';r.turn=r.dealer;r.drawn=false;beginTurn(r)}
+function buryDue(r){for(const m of r.melds)m.buried = !!(m.buryOnTurnOf===r.turn);if(r.melds.some(m=>m.buried)){r.melds=r.melds.filter(m=>!m.buried);addLog(r,'Завершённый терец убран со стола после полного круга.')}}
+function beginTurn(r){buryDue(r);emit(r);if(r.players[r.turn].bot)setTimeout(()=>botTurn(r),650)}
+function endTurn(r){r.turn=(r.turn+1)%4;r.drawn=false;beginTurn(r)}
+function botTurn(r){if(r.phase!=='turn'||!r.players[r.turn].bot)return;const i=r.turn;if(i===r.dealer&&r.hands[i].length===15&&!r.discard.length){r.discard.push(r.hands[i].pop());addLog(r,`${r.players[i].name} сбросил карту`);return endTurn(r)}if(r.stock.length){r.hands[i].push(r.stock.pop());addLog(r,`${r.players[i].name} взял карту из колоды`)}if(r.hands[i].length){let k=r.hands[i].findIndex(c=>!isJ(c));if(k<0)k=0;r.discard.push(r.hands[i].splice(k,1)[0]);addLog(r,`${r.players[i].name} сбросил карту`)}endTurn(r)}
+function validMeld(cs){if(cs.length<3)return false;const real=cs.filter(c=>!isJ(c));if(!real.length)return false;const sameRank=real.every(c=>c.rank===real[0].rank)&&new Set(real.map(c=>c.suit)).size===real.length&&cs.length<=4;if(sameRank)return true;if(cs.filter(isJ).length)return false;if(!real.every(c=>c.suit===real[0].suit))return false;const idx=real.map(c=>RANKS.indexOf(c.rank));return idx.every((v,k)=>k===0||v===idx[k-1]+1)}
+function findRoomBySocket(s){for(const r of rooms.values()){let i=r.players.findIndex(p=>p&&p.sid===s.id);if(i>=0)return [r,i]}return [null,-1]}
+io.on('connection',socket=>{
+ socket.on('create',name=>{const r=newRoom(String(name||'Игорь').slice(0,20),socket.id);rooms.set(r.code,r);socket.join(r.code);socket.emit('joined',{code:r.code});emit(r)});
+ socket.on('join',({name,code})=>{const r=rooms.get(String(code||'').toUpperCase());if(!r||r.started)return socket.emit('errorMsg','Комната не найдена или партия уже началась.');const i=r.players.findIndex(x=>!x);if(i<0)return socket.emit('errorMsg','Нет свободных мест.');r.players[i]={name:String(name||NAMES[i]).slice(0,20),sid:socket.id,bot:false};socket.join(r.code);addLog(r,`${r.players[i].name} подключился`);socket.emit('joined',{code:r.code});emit(r)});
+ socket.on('start',()=>{const [r,i]=findRoomBySocket(socket);if(r&&i===0&&!r.started)startGame(r)});
+ socket.on('cut',p=>{const [r,i]=findRoomBySocket(socket);if(r&&r.phase==='cut'&&i===r.cutter)completeCut(r,p,false)});
+ socket.on('drawStock',()=>{const [r,i]=findRoomBySocket(socket);if(!r||r.phase!=='turn'||i!==r.turn||r.drawn)return;if(i===r.dealer&&r.hands[i].length===15&&!r.discard.length)return socket.emit('errorMsg','Раздающий первым действием должен сбросить карту.');if(!r.stock.length)return socket.emit('errorMsg','Колода закончилась: пересборка будет добавлена следующим сетевым шагом.');r.hands[i].push(r.stock.pop());r.drawn=true;addLog(r,`${r.players[i].name} взял карту из колоды`);emit(r)});
+ socket.on('drawDiscard',()=>{const [r,i]=findRoomBySocket(socket);if(!r||r.phase!=='turn'||i!==r.turn||r.drawn||!r.discard.length)return;r.hands[i].push(r.discard.pop());r.drawn=true;addLog(r,`${r.players[i].name} взял карту сброса`);emit(r)});
+ socket.on('discard',id=>{const [r,i]=findRoomBySocket(socket);if(!r||r.phase!=='turn'||i!==r.turn)return;const dealerOpening=i===r.dealer&&r.hands[i].length===15&&!r.discard.length;if(!r.drawn&&!dealerOpening)return;const k=r.hands[i].findIndex(c=>c.id===id);if(k<0)return;const c=r.hands[i].splice(k,1)[0];r.discard.push(c);addLog(r,`${r.players[i].name} сбросил ${cardText(c)}`);endTurn(r)});
+ socket.on('meld',ids=>{const [r,i]=findRoomBySocket(socket);if(!r||r.phase!=='turn'||i!==r.turn||(!r.drawn&&!(i===r.dealer&&r.hands[i].length===15&&!r.discard.length)))return;const cs=(ids||[]).map(id=>r.hands[i].find(c=>c.id===id)).filter(Boolean);if(cs.length!==(ids||[]).length||!validMeld(cs))return socket.emit('errorMsg','Это не правильный терец.');r.hands[i]=r.hands[i].filter(c=>!ids.includes(c.id));const m={id:Date.now()+Math.random(),owner:i,cards:cs,buryOnTurnOf:null};if(cs.length===4&&cs.filter(isJ).length<=1&&cs.filter(c=>!isJ(c)).every(c=>c.rank===cs.find(x=>!isJ(x)).rank))m.buryOnTurnOf=i;r.melds.push(m);addLog(r,`${r.players[i].name} выложил терец`);emit(r)});
+ socket.on('disconnect',()=>{const [r,i]=findRoomBySocket(socket);if(!r)return;if(!r.started){r.players[i]=null;addLog(r,'Игрок отключился');emit(r)}else{r.players[i].bot=true;r.players[i].sid=null;addLog(r,`${r.players[i].name}: управление передано боту`);emit(r);if(r.turn===i)setTimeout(()=>botTurn(r),500)}});
+});
+app.get('/',(req,res)=>res.type('html').send(HTML));
+server.listen(PORT,()=>console.log('FRISH v0.4 on',PORT));
+const HTML=`<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ФРИШ Multiplayer v0.4</title><style>
+*{box-sizing:border-box}body{margin:0;background:#104a37;color:#fff;font-family:Arial,sans-serif}.wrap{max-width:1180px;margin:auto;padding:18px}.panel{background:#f5efdf;color:#171717;border-radius:16px;padding:16px;margin:10px 0}.hidden{display:none!important}button,input{font:inherit;padding:10px 13px;border:0;border-radius:10px;margin:3px}button{cursor:pointer}.top{display:flex;gap:8px;flex-wrap:wrap}.table{position:relative;min-height:610px;border:2px solid #ffffff55;border-radius:28px;background:#176147;margin-top:12px}.seat{position:absolute;background:#f5efdf;color:#111;padding:9px 13px;border-radius:12px;min-width:150px;text-align:center}.s0{bottom:8px;left:50%;transform:translateX(-50%)}.s1{left:8px;top:48%}.s2{top:8px;left:50%;transform:translateX(-50%)}.s3{right:8px;top:48%}.center{position:absolute;left:50%;top:45%;transform:translate(-50%,-50%);text-align:center;width:72%}.piles{display:flex;justify-content:center;gap:25px;align-items:center}.card{display:inline-flex;position:relative;width:58px;height:82px;background:white;color:#111;border-radius:7px;border:1px solid #aaa;margin:2px;align-items:center;justify-content:center;font-weight:800;font-size:20px;user-select:none}.red{color:#c71919}.selected{transform:translateY(-10px);outline:3px solid #f3c941}.back{background:#1b2d72;color:white}.melds{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin:14px}.meld{padding:5px;border:1px dashed #fff9;border-radius:9px}.hand{position:absolute;bottom:65px;left:3%;right:3%;display:flex;justify-content:center;flex-wrap:wrap}.cutdeck{width:110px;height:150px;background:#182c71;border:5px solid #fff;border-radius:12px;margin:20px auto;touch-action:none;cursor:ew-resize}.log{font-size:13px;white-space:pre-line}.sv{border:3px solid #e4bd35}.bury{opacity:.75;box-shadow:0 0 0 3px #e4bd35 inset}.turn{outline:4px solid #e4bd35}.status{font-weight:800}.actions{position:absolute;bottom:8px;left:8px;right:8px;text-align:center}@media(max-width:700px){.table{min-height:720px}.center{width:94%;top:38%}.card{width:45px;height:65px;font-size:16px}.s1{top:56%}.s3{top:56%}}
+</style></head><body><div class="wrap"><h1>ФРИШ · Multiplayer v0.4</h1><div id="lobby" class="panel"><input id="name" placeholder="Ваше имя"><button onclick="createRoom()">Создать комнату</button><input id="code" placeholder="FRISH-0000"><button onclick="joinRoom()">Войти</button></div><div id="room" class="hidden"><div class="panel"><b>Комната <span id="roomCode"></span></b><div id="players"></div><button id="start" onclick="socket.emit('start')">НАЧАТЬ ПАРТИЮ</button></div><div id="game" class="hidden"><div class="top"><span class="panel status" id="meta"></span><span class="panel status" id="phase"></span></div><div class="table"><div id="seats"></div><div class="center"><div id="cutUI" class="hidden"><b id="cutText"></b><div class="cutdeck" id="cutdeck"></div><small>Проведите пальцем/мышью по колоде. Через 7 секунд снятие выполнится автоматически.</small></div><div id="playUI" class="hidden"><div class="piles"><div><small>КОЛОДА</small><div class="card back" onclick="drawStock()">ФРИШ</div><span id="stockN"></span></div><div><small>СВЕТКА</small><div id="svetka"></div></div><div><small>СБРОС</small><div id="discard"></div></div></div><div class="melds" id="melds"></div></div></div><div class="hand" id="hand"></div><div class="actions"><button onclick="drawDiscard()">ВЗЯТЬ СБРОС</button><button onclick="layMeld()">ВЫЛОЖИТЬ ТЕРЕЦ</button><button onclick="discardSelected()">СБРОСИТЬ</button></div></div></div><div class="panel log" id="log"></div></div></div><script src="/socket.io/socket.io.js"></script><script>
+const socket=io();let S=null,sel=new Set();const q=s=>document.querySelector(s);function createRoom(){socket.emit('create',q('#name').value)}function joinRoom(){socket.emit('join',{name:q('#name').value,code:q('#code').value})}socket.on('joined',x=>{q('#roomCode').textContent=x.code;q('#lobby').classList.add('hidden');q('#room').classList.remove('hidden')});socket.on('errorMsg',alert);socket.on('state',s=>{S=s;render()});function ct(c){return !c?'':c.rank==='JOKER'?'J':c.rank+c.suit}function ce(c,click=true){let d=document.createElement('div');d.className='card '+((c&&['♥','♦'].includes(c.suit))?'red':'');d.textContent=ct(c);if(c&&click){d.onclick=()=>{sel.has(c.id)?sel.delete(c.id):sel.add(c.id);render()};if(sel.has(c.id))d.classList.add('selected')}return d}function render(){if(!S)return;q('#roomCode').textContent=S.code;q('#players').innerHTML=S.players.map((p,i)=>(i+1)+'. '+(p?p.name+(p.bot?' · БОТ':''):'свободно')).join('<br>');q('#start').style.display=(!S.started&&S.myIndex===0)?'inline-block':'none';if(!S.started)return;q('#game').classList.remove('hidden');q('#meta').textContent='Раздача '+S.dealNo+' · ×'+S.mult+' · раздаёт '+S.players[S.dealer].name;q('#phase').textContent=S.phase==='cut'?'Снимает '+S.players[S.cutter].name:'Ход: '+S.players[S.turn].name;q('#cutUI').classList.toggle('hidden',S.phase!=='cut');q('#playUI').classList.toggle('hidden',S.phase==='cut');q('#cutText').textContent=S.players[S.cutter].name+' снимает колоду';q('#seats').innerHTML='';S.players.forEach((p,i)=>{let d=document.createElement('div');d.className='seat s'+i+(S.turn===i&&S.phase==='turn'?' turn':'');d.textContent=p.name+' · '+p.count+' карт';q('#seats').appendChild(d)});q('#svetka').innerHTML='';if(S.svetka){let x=ce(S.svetka,false);x.classList.add('sv');q('#svetka').appendChild(x)}q('#discard').innerHTML='';if(S.discard)q('#discard').appendChild(ce(S.discard,false));q('#stockN').textContent=S.stockCount;q('#hand').innerHTML='';S.myHand.forEach(c=>q('#hand').appendChild(ce(c,true)));q('#melds').innerHTML='';S.melds.forEach(m=>{let d=document.createElement('div');d.className='meld'+(m.buryOnTurnOf!==null?' bury':'');m.cards.forEach(c=>d.appendChild(ce(c,false)));q('#melds').appendChild(d)});q('#log').textContent=S.log.join('\n')}
+q('#cutdeck').addEventListener('pointerup',e=>{if(!S||S.phase!=='cut'||S.myIndex!==S.cutter)return;let r=e.currentTarget.getBoundingClientRect(),p=Math.round(((e.clientY-r.top)/r.height)*80)+13;socket.emit('cut',p)});function drawStock(){socket.emit('drawStock')}function drawDiscard(){socket.emit('drawDiscard')}function layMeld(){if(sel.size<3)return alert('Выберите минимум 3 карты.');socket.emit('meld',[...sel]);sel.clear()}function discardSelected(){if(sel.size!==1)return alert('Выберите одну карту.');socket.emit('discard',[...sel][0]);sel.clear()}
+</script></body></html>`;

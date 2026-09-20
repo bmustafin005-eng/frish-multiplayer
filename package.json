@@ -1,13 +1,8 @@
 {
-  "name": "frish-multiplayer-test",
-  "version": "0.3.0",
-  "private": true,
-  "type": "commonjs",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "dependencies": {
-    "express": "^4.21.2",
-    "socket.io": "^4.8.1"
-  }
+  "name":"frish-multiplayer",
+  "version":"0.4.0",
+  "private":true,
+  "scripts":{"start":"node server.js"},
+  "engines":{"node":">=18"},
+  "dependencies":{"express":"^4.21.2","socket.io":"^4.8.1"}
 }
