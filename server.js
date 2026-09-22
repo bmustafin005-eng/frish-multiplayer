@@ -52,6 +52,35 @@ function finishOrdinaryDeal(r,finisher){
  r.scoreHistory=r.scoreHistory.filter(x=>x.dealNo!==r.dealNo);
  r.scoreHistory.push({dealNo:r.dealNo,mult:r.dealDisplayMult,deal:[...r.dealAccum],totals:[...r.cumulative]});
 }
+function findPairsFinish(hand){
+ if(hand.length!==15)return null;
+ for(let di=0;di<hand.length;di++){
+  const rest=hand.filter((_,x)=>x!==di),jokers=rest.filter(isJ),real=rest.filter(c=>!isJ(c)),g=new Map();
+  for(const c of real){const k=c.rank+'|'+c.suit;if(!g.has(k))g.set(k,[]);g.get(k).push(c)}
+  if([...g.values()].some(a=>a.length>2))continue;
+  const singles=[...g.values()].filter(a=>a.length===1),pairs=[...g.values()].filter(a=>a.length===2);
+  if(singles.length!==jokers.length||pairs.length+singles.length!==7)continue;
+  const groups=pairs.map(a=>[...a]);singles.forEach((a,n)=>groups.push([a[0],jokers[n]]));
+  return {discard:hand[di],groups};
+ }
+ return null;
+}
+function finishPairsDeal(r,finisher){
+ const delta=[0,0,0,0];delta[finisher]=-50*r.mult;
+ for(let i=0;i<4;i++)if(i!==finisher)delta[i]=r.ran[i]?handPenalty(r.hands[i])*r.mult:50*r.mult;
+ for(let i=0;i<4;i++){r.dealAccum[i]+=delta[i];r.cumulative[i]+=r.dealAccum[i]}
+ r.scoreHistory=r.scoreHistory.filter(x=>x.dealNo!==r.dealNo);r.scoreHistory.push({dealNo:r.dealNo,mult:r.dealDisplayMult,deal:[...r.dealAccum],totals:[...r.cumulative]});
+}
+function beginFinishReport(r,i,kind='ordinary'){
+ r.phase='finish_report';r.allFinisher=i;r.allDeadline=Date.now()+15000;r.finishKind=kind;
+ addLog(r,`${r.players[i].name} закончил${kind==='pairs'?' ПАРАМИ':''}. 15 секунд на ПРОВЕРКУ.`);emit(r);
+ if(r.reportTimer)clearTimeout(r.reportTimer);
+ r.reportTimer=setTimeout(()=>{if(r.phase!=='finish_report'||r.allFinisher!==i)return;
+  if(kind==='pairs')finishPairsDeal(r,i);else finishOrdinaryDeal(r,i);
+  addLog(r,`Раздача №${r.dealNo} завершена`);r.phase='deal_end';emit(r);
+  setTimeout(()=>{r.dealNo++;r.mult=[1,6,11,16].includes(r.dealNo)?2:1;startDeal(r,false)},3500);
+ },15000);
+}
 function applyZastrel(r,offender,reason,meldId=null){
  if(r.reportTimer){clearTimeout(r.reportTimer);r.reportTimer=null}
  const pts=20*r.mult;r.dealAccum[offender]+=pts;r.highlightMeldId=meldId;
@@ -75,10 +104,24 @@ function botFindRun(r,i){
 }
 function botLay(r,i,c){
  const ids=new Set(c.cards.map(x=>x.id));const cards=[];r.hands[i]=r.hands[i].filter(x=>{if(ids.has(x.id)){cards.push(x);return false}return true});
- const v=validateMeldCanonical(r,c.cards,'NORMAL');r.melds.push({id:Date.now()+Math.random(),owner:i,cards:c.cards,validation:v,reportUntilTurnSerial:r.turnSerial+4,buryOnTurnOf:null,buried:false});
+ const v=validateMeldCanonical(r,c.cards,'NORMAL');const bm={id:Date.now()+Math.random(),owner:i,cards:c.cards,validation:v,reportUntilTurnSerial:r.turnSerial+4,buryOnTurnOf:null,buried:false};if(v.valid&&v.type==='SAME_RANK'&&c.cards.length===4)bm.buryOnTurnOf=i;r.melds.push(bm);
 }
-function botUsePodlozhki(r,i){if(!r.ran[i]&&!r.allDeclared[i])return;let changed=true;while(changed){changed=false;outer:for(let hi=0;hi<r.hands[i].length;hi++){const c=r.hands[i][hi];if(isJ(c))continue;for(const m of r.melds){const front=[c,...m.cards],back=[...m.cards,c];const vf=validateMeldCanonical(r,front,'NORMAL'),vb=validateMeldCanonical(r,back,'NORMAL');if(vf.valid||vb.valid){m.cards=vf.valid?front:back;m.validation=vf.valid?vf:vb;r.hands[i].splice(hi,1);addLog(r,`${r.players[i].name} подложил ${cardText(c)}`);changed=true;break outer}}}}}
-function botHasPodlozhka(r,i,c){if(isJ(c))return false;return r.melds.some(m=>validateMeldCanonical(r,[c,...m.cards],'NORMAL').valid||validateMeldCanonical(r,[...m.cards,c],'NORMAL').valid)}
+function botUsePodlozhki(r,i){
+ if(!r.ran[i]&&!r.allDeclared[i])return;let changed=true;
+ while(changed){changed=false;
+  outer:for(let hi=0;hi<r.hands[i].length;hi++){const c=r.hands[i][hi];if(isJ(c))continue;
+   for(const m of r.melds){
+    if(!m.extTurn||m.extTurn.turnSerial!==r.turnSerial||m.extTurn.player!==i)m.extTurn={turnSerial:r.turnSerial,player:i,front:0,back:0};
+    const front=[c,...m.cards],back=[...m.cards,c],vf=validateMeldCanonical(r,front,'NORMAL'),vb=validateMeldCanonical(r,back,'NORMAL');
+    let side=null;if(vf.valid&&m.extTurn.front<2)side='front';else if(vb.valid&&m.extTurn.back<2)side='back';
+    if(side){m.cards=side==='front'?front:back;m.validation=side==='front'?vf:vb;m.extTurn[side]++;r.hands[i].splice(hi,1);
+      if(m.validation.valid&&m.validation.type==='SAME_RANK'&&m.cards.length===4&&m.buryOnTurnOf==null)m.buryOnTurnOf=i;
+      addLog(r,`${r.players[i].name} подложил ${cardText(c)}`);changed=true;break outer}
+   }
+  }
+ }
+}
+function botHasPodlozhka(r,i,c){if(isJ(c))return false;return r.melds.some(m=>{const st=(m.extTurn&&m.extTurn.turnSerial===r.turnSerial&&m.extTurn.player===i)?m.extTurn:{front:0,back:0};return(st.front<2&&validateMeldCanonical(r,[c,...m.cards],'NORMAL').valid)||(st.back<2&&validateMeldCanonical(r,[...m.cards,c],'NORMAL').valid)})}
 function botCanFinish(r,i){
  // Conservative finish search: after podlozhki, partition all but one discard into valid 3/4-card melds.
  const h=r.hands[i];if(h.length<4)return null;const cand=botCandidateMelds(r,i);
@@ -204,19 +247,7 @@ io.on('connection',socket=>{
    if(points>=51)r.ran[i]=true;
  }
  addLog(r,`${r.players[i].name} сбросил ${cardText(c)}`);
- if(r.allDeclared[i]&&r.hands[i].length===0){
-   r.phase='finish_report';r.allFinisher=i;r.allDeadline=null;
-   addLog(r,`${r.players[i].name} закончил. 15 секунд на ПРОВЕРКУ.`);
-   emit(r);
-   if(r.reportTimer)clearTimeout(r.reportTimer);
-   r.reportTimer=setTimeout(()=>{
-     if(r.phase!=='finish_report'||r.allFinisher!==i)return;
-     finishOrdinaryDeal(r,i);
-     addLog(r,`Раздача №${r.dealNo} завершена`);
-     r.phase='deal_end';emit(r);
-     setTimeout(()=>{r.dealNo++;r.mult=[1,6,11,16].includes(r.dealNo)?2:1;startDeal(r,false)},3500);
-   },15000);
-   return;
+ if(r.allDeclared[i]&&r.hands[i].length===0){beginFinishReport(r,i,'ordinary');return;
  }
  endTurn(r)});
  socket.on('meld',ids=>{const [r,i]=findRoomBySocket(socket);if(!r||r.phase!=='turn'||i!==r.turn||(!r.drawn&&!(i===r.dealer&&r.hands[i].length===15&&!r.discard.length)))return;
@@ -227,6 +258,7 @@ io.on('connection',socket=>{
    const mode=r.allDeclared[i]?'ALL_FINISH':'RUN';
    const validation=validateMeldCanonical(r,cs,mode);const handOrderSnapshot=ids.slice();
    r.hands[i]=r.hands[i].filter(c=>!ids.includes(c.id));
+   if(r.takenDiscardId[i]!=null&&ids.includes(r.takenDiscardId[i]))r.takenDiscardId[i]=null;
    const m={id:Date.now()+Math.random(),owner:i,cards:cs,buryOnTurnOf:null,validation,laidAtTurnSerial:r.turnSerial,reportUntilTurnSerial:r.turnSerial+4,inactive:false,handOrderSnapshot};
    r.melds.push(m);
    if(validation.valid){
@@ -237,7 +269,34 @@ io.on('connection',socket=>{
    addLog(r,`${r.players[i].name} выложил терец`);
    emit(r)
  });
- socket.on('extendMeld',({meldId,ids})=>{const[r,i]=findRoomBySocket(socket);if(!r||r.phase!=='turn'||i!==r.turn)return;if(!r.ran[i]&&!r.allDeclared[i])return socket.emit('errorMsg','Подложки доступны только после побега или при завершении через ВСЕ.');const m=r.melds.find(x=>String(x.id)===String(meldId));if(!m)return;ids=(ids||[]).map(Number);const picked=[];for(const id of ids){const c=r.hands[i].find(x=>x.id===id);if(c)picked.push(c)}if(!picked.length)return;const front=[...picked,...m.cards],back=[...m.cards,...picked];const vf=validateMeldCanonical(r,front,r.allDeclared[i]?'ALL_FINISH':'NORMAL'),vb=validateMeldCanonical(r,back,r.allDeclared[i]?'ALL_FINISH':'NORMAL');let trial=null,v=null;if(vf.valid){trial=front;v=vf}else if(vb.valid){trial=back;v=vb}if(!trial)return socket.emit('errorMsg','Эти карты нельзя подложить к выбранному терцу.');const set=new Set(picked.map(c=>c.id));r.hands[i]=r.hands[i].filter(c=>!set.has(c.id));if(r.takenDiscardId[i]!=null&&set.has(r.takenDiscardId[i]))r.takenDiscardId[i]=null;m.cards=trial;m.validation=v;if(v.valid&&v.type==='SAME_RANK'&&trial.length===4&&m.buryOnTurnOf==null)m.buryOnTurnOf=i;addLog(r,`${r.players[i].name} подложил ${picked.map(cardText).join(' ')}`);emit(r);});
+ socket.on('extendMeld',({meldId,ids})=>{const[r,i]=findRoomBySocket(socket);if(!r||r.phase!=='turn'||i!==r.turn)return;
+   if(!r.ran[i]&&!r.allDeclared[i])return socket.emit('errorMsg','Подложки доступны только после побега или при завершении через ВСЕ.');
+   const m=r.melds.find(x=>String(x.id)===String(meldId));if(!m)return;
+   ids=(ids||[]).map(Number);if(ids.length<1||ids.length>2)return socket.emit('errorMsg','За один раз можно подложить не более 2 карт.');
+   const picked=[];for(const id of ids){const c=r.hands[i].find(x=>x.id===id);if(c)picked.push(c)}if(picked.length!==ids.length)return;
+   if(!m.extTurn||m.extTurn.turnSerial!==r.turnSerial||m.extTurn.player!==i)m.extTurn={turnSerial:r.turnSerial,player:i,front:0,back:0};
+   const front=[...picked,...m.cards],back=[...m.cards,...picked];
+   const vf=validateMeldCanonical(r,front,r.allDeclared[i]?'ALL_FINISH':'NORMAL'),vb=validateMeldCanonical(r,back,r.allDeclared[i]?'ALL_FINISH':'NORMAL');
+   let trial=null,v=null,side=null;
+   if(vf.valid&&m.extTurn.front+picked.length<=2){trial=front;v=vf;side='front'}
+   else if(vb.valid&&m.extTurn.back+picked.length<=2){trial=back;v=vb;side='back'}
+   if(!trial)return socket.emit('errorMsg','К этой стороне терца в текущем ходу можно подложить максимум 2 карты.');
+   const set=new Set(picked.map(c=>c.id));r.hands[i]=r.hands[i].filter(c=>!set.has(c.id));
+   if(r.takenDiscardId[i]!=null&&set.has(r.takenDiscardId[i]))r.takenDiscardId[i]=null;
+   m.cards=trial;m.validation=v;m.extTurn[side]+=picked.length;
+   if(v.valid&&v.type==='SAME_RANK'&&trial.length===4&&m.buryOnTurnOf==null)m.buryOnTurnOf=i;
+   addLog(r,`${r.players[i].name} подложил ${picked.map(cardText).join(' ')}`);emit(r);
+ });
+ socket.on('declareAll',()=>{const[r,i]=findRoomBySocket(socket);if(!r||r.phase!=='turn'||i!==r.turn)return;
+   r.allDeclared[i]=true;addLog(r,`${r.players[i].name} — ВСЕ`);notice(r,`${r.players[i].name} — ВСЕ`,5000);
+   const pf=findPairsFinish(r.hands[i]);
+   if(pf){
+     // Pairs are a special finish, not ordinary terets. Show seven pairs on table and make the final discard.
+     for(const g of pf.groups)r.melds.push({id:Date.now()+Math.random(),owner:i,cards:g,validation:{valid:true,type:'PAIRS'},laidAtTurnSerial:r.turnSerial,reportUntilTurnSerial:r.turnSerial+4,inactive:false,buryOnTurnOf:null});
+     r.hands[i]=[];r.discard.push(pf.discard);r.takenDiscardId[i]=null;notice(r,`${r.players[i].name} — ВСЕ · ПАРЫ`,5000);return beginFinishReport(r,i,'pairs');
+   }
+   emit(r);
+ });
  socket.on('sayCard',()=>{const[r,i]=findRoomBySocket(socket);if(r&&r.hands[i].length===1&&!r.cardSaid[i]){r.cardSaid[i]=true;addLog(r,`${r.players[i].name} — КАРТА`);notice(r,`${r.players[i].name} — КАРТА`,5000)}});
  socket.on('frishPropose',()=>{const[r,i]=findRoomBySocket(socket);if(!r||!r.started||r.phase==='cut')return;const jc=r.hands[i].filter(isJ).length;if(jc>=2)return socket.emit('errorMsg','С двумя JOKER нельзя предлагать ФРИШ.');addLog(r,`${r.players[i].name} предложил ФРИШ`);emit(r)});
  socket.on('checkBadMeld',meldId=>{const[r,caller]=findRoomBySocket(socket);if(!r)return;
@@ -263,7 +322,7 @@ io.on('connection',socket=>{
  });
  socket.on('disconnect',()=>{const [r,i]=findRoomBySocket(socket);if(!r)return;if(!r.started){r.players[i]=null;addLog(r,'Игрок отключился');emit(r)}else{r.players[i].bot=true;r.players[i].sid=null;addLog(r,`${r.players[i].name}: управление передано боту`);emit(r);if(r.turn===i)setTimeout(()=>botTurn(r),500)}});
 });
-const HTML=`<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ФРИШ Multiplayer v0.9.2 RULE ENFORCEMENT</title><style>
+const HTML=`<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ФРИШ Multiplayer v0.9.3 ALL PODLOZHKI FIX</title><style>
 *{box-sizing:border-box}body{margin:0;background:#104a37;color:#fff;font-family:Arial,sans-serif}.wrap{max-width:1180px;margin:auto;padding:18px}.panel{background:#f5efdf;color:#171717;border-radius:16px;padding:16px;margin:10px 0}.hidden{display:none!important}button,input{font:inherit;padding:10px 13px;border:0;border-radius:10px;margin:3px}button{cursor:pointer}.top{display:flex;gap:8px;flex-wrap:wrap}.table{position:relative;min-height:660px;border:2px solid #ffffff55;border-radius:28px;background:#176147;margin-top:12px}.seat{position:absolute;background:#f5efdf;color:#111;padding:9px 13px;border-radius:12px;min-width:150px;text-align:center}.s0{bottom:12px;left:50%;transform:translateX(-50%)}.s1{left:8px;top:48%}.s2{top:8px;left:50%;transform:translateX(-50%)}.s3{right:8px;top:48%}.center{position:absolute;left:18%;right:18%;top:105px;bottom:90px;text-align:center;overflow:auto}.piles{display:flex;justify-content:center;gap:25px;align-items:center}.card{display:inline-flex;position:relative;width:58px;height:82px;background:white;color:#111;border-radius:7px;border:1px solid #aaa;margin:2px;align-items:center;justify-content:center;font-weight:800;font-size:20px;user-select:none}.red{color:#c71919}.selected{transform:translateY(-14px);outline:4px solid #f3c941;box-shadow:0 8px 16px #0006;z-index:8}.dragging{transform:translateY(-16px) scale(1.06);outline:4px solid #fff;box-shadow:0 12px 22px #0008;z-index:20}.dropBefore{margin-left:26px;box-shadow:-19px 0 0 -13px #f3c941}.dropAfter{margin-right:26px;box-shadow:19px 0 0 -13px #f3c941}.back{background:#1b2d72;color:white}.melds{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin:14px}.meld{padding:5px;border:1px dashed #fff9;border-radius:9px}.hand{position:relative;margin:18px 6px 8px;display:flex;justify-content:center;flex-wrap:wrap;min-height:86px;touch-action:none}.cutdeck{width:110px;height:150px;background:#182c71;border:5px solid #fff;border-radius:12px;margin:20px auto;touch-action:none;cursor:ew-resize}.log{font-size:13px;white-space:pre-line}.sv{border:3px solid #e4bd35}.bury{opacity:.75;box-shadow:0 0 0 3px #e4bd35 inset}.turn{outline:4px solid #e4bd35}.status{font-weight:800}.gameLayout{display:grid;grid-template-columns:minmax(0,1fr) 220px;gap:12px;align-items:start}.boardCol{min-width:0}.controlRail{position:sticky;top:8px;background:#0c3d2e;border:1px solid #ffffff44;border-radius:16px;padding:10px}.actions,.global{display:flex;flex-direction:column;gap:7px;margin:0}.actions button,.global button{width:100%;margin:0}.global{margin-top:10px}.controlTitle{text-align:center;font-weight:800;margin-bottom:8px}.targetMeld{outline:4px solid #f3c941;background:#ffffff16}.hand .card{touch-action:none;cursor:grab}.hand .card:active{cursor:grabbing}.actionPrimary{font-weight:800}.disabled{opacity:.45;pointer-events:none}.modal{position:fixed;inset:0;background:#0009;display:flex;align-items:center;justify-content:center;z-index:50}.modalBox{background:#f5efdf;color:#111;border-radius:16px;padding:16px;max-width:92vw;max-height:82vh;overflow:auto}.scoreTable{border-collapse:collapse;width:100%}.scoreTable td,.scoreTable th{border:1px solid #999;padding:6px;text-align:center}@media(max-width:820px){.gameLayout{display:flex;flex-direction:column}.controlRail{position:relative;top:auto;width:100%;order:2}.boardCol{width:100%}.actions,.global{flex-direction:row;flex-wrap:wrap;justify-content:center}.actions button,.global button{width:auto;flex:1 1 145px}.wrap{padding:8px}.table{min-height:560px;padding-bottom:8px}.center{left:8%;right:8%;top:92px;bottom:86px}.card{width:45px;height:65px;font-size:16px}.seat{min-width:112px;font-size:13px}.s1{top:48%}.s3{top:48%}.hand{margin-top:20px}.actions button,.global button{padding:10px 9px;font-size:13px}}
 #screenNotice{position:fixed;left:50%;top:14%;transform:translateX(-50%);z-index:10000;background:#111e;color:#fff;padding:16px 24px;border:2px solid #f3c941;border-radius:14px;font-size:22px;font-weight:900;text-align:center;max-width:min(88vw,720px);pointer-events:none}#modal.overlay{position:fixed;inset:0;z-index:9000;background:#000b;display:flex;align-items:center;justify-content:center;padding:18px;overflow:auto}#modal.overlay .modalBox{background:#173b31;color:#fff;border:1px solid #ffffff55;border-radius:16px;padding:18px;max-width:min(94vw,900px);max-height:90vh;overflow:auto}.meld .card{width:48px;height:68px;font-size:17px;margin-left:-5px}.meldChoice{display:inline-flex;gap:2px;align-items:center;padding:8px;margin:6px;border:2px solid #ffffff55;border-radius:12px;background:#24483e;cursor:pointer}.meldChoice .miniCard{width:38px;height:54px;border-radius:6px;background:#ddd;color:#111;display:flex;align-items:center;justify-content:center;font-weight:800;white-space:pre-line;text-align:center}.meldChoice .miniCard.red{color:#b31325}.scoreOverlayTable{border-collapse:collapse;width:100%;background:#fff;color:#111}.scoreOverlayTable th,.scoreOverlayTable td{border:1px solid #777;padding:7px;text-align:center}@media(max-width:700px){.meld .card{width:40px;height:58px;font-size:14px}.melds{gap:5px;margin:7px}.meld{padding:3px}#screenNotice{top:9%;font-size:18px;padding:12px 16px}}#melds .meld.zastrelHit{outline:5px solid #ff3030;background:#ff303033;box-shadow:0 0 22px #ff3030}
 .gameLayout{display:grid!important;grid-template-columns:minmax(0,1fr) 300px!important;gap:14px!important;align-items:start!important}
@@ -313,7 +372,17 @@ const HTML=`<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta nam
  #hand .card{width:34px!important;min-width:34px!important;height:52px!important;font-size:12px!important}
  .melds{padding-bottom:86px!important}
 }
-</style></head><body><div class="wrap"><h1>ФРИШ · Multiplayer v0.9.2 RULE ENFORCEMENT</h1><div id="lobby" class="panel"><input id="name" placeholder="Ваше имя"><button id="createBtn">Создать комнату</button><input id="code" placeholder="FRISH-0000"><button id="joinBtn">Войти</button></div><div id="room" class="hidden"><div class="panel"><b>Комната <span id="roomCode"></span></b><div id="players"></div><button id="start" onclick="socket.emit('start')">НАЧАТЬ ПАРТИЮ</button></div><div id="screenNotice" class="hidden"></div><div id="game" class="hidden"><div id="allBanner" class="hidden" style="margin:8px auto;padding:12px 18px;max-width:520px;text-align:center;font-weight:900;font-size:22px;background:#f3c941;color:#111;border-radius:12px"></div><div class="top"><span class="panel status" id="meta"></span><span class="panel status" id="phase"></span></div><div class="gameLayout"><div class="boardCol"><div class="table"><div id="seats"></div><div class="center"><div id="cutUI" class="hidden"><b id="cutText"></b><div class="cutdeck" id="cutdeck"></div><small>Проведите пальцем/мышью по колоде. Через 7 секунд снятие выполнится автоматически.</small></div><div id="playUI" class="hidden"><div class="piles"><div><div class="card back" onclick="drawStock()"></div><span id="stockN"></span></div><div><small>СВЕТКА</small><div id="svetka"></div></div><div><small>СБРОС</small><div id="discard"></div></div></div><div class="melds" id="melds"></div></div></div><div class="hand" id="hand"></div></div><aside class="controlRail"><div class="controlTitle">ДЕЙСТВИЯ</div><div class="actions"><button class="actionPrimary" id="stockBtn" onclick="drawStock()">ВЗЯТЬ ИЗ КОЛОДЫ</button><button id="discardTakeBtn" onclick="drawDiscard()">ВЗЯТЬ СБРОС</button><button onclick="layMeld()">ВЫЛОЖИТЬ ТЕРЕЦ</button><button id="extendBtn" onclick="startExtend()">ПОДЛОЖИТЬ</button><button onclick="discardSelected()">СБРОСИТЬ</button></div><div class="global"><button onclick="declareAll()">ВСЕ</button><button onclick="openCheck()">ПРОВЕРКА</button><button onclick="toggleScore()">ТАБЛИЦА</button><button onclick="proposeFrish()">ФРИШ</button><button onclick="sayCard()">КАРТА</button></div></aside></div></div><div class="panel log" id="log"></div><div id="modal" class="hidden"></div></div></div><script src="/socket.io/socket.io.js"></script><script>
+
+/* v0.9.3 compact table: keep all laid terets visible without vertical scrolling */
+.center{overflow:hidden!important;left:15%!important;right:15%!important;top:92px!important;bottom:112px!important}
+.melds{gap:4px!important;margin:6px!important;align-content:flex-start!important}
+.meld{padding:2px!important;border-radius:6px!important}
+.meld .card{width:34px!important;height:48px!important;min-width:34px!important;font-size:12px!important;margin-left:-7px!important}
+.meld .card:first-child{margin-left:0!important}
+.meld .card .corner.tl{left:2px!important;top:3px!important;font-size:10px!important}
+.meld .card .corner.br{right:2px!important;bottom:3px!important;font-size:10px!important}
+@media(max-width:900px){.center{left:6%!important;right:6%!important;top:86px!important;bottom:108px!important}.meld .card{width:29px!important;height:42px!important;min-width:29px!important;font-size:10px!important;margin-left:-7px!important}.melds{gap:3px!important;margin:4px!important}}
+</style></head><body><div class="wrap"><h1>ФРИШ · Multiplayer v0.9.3 ALL PODLOZHKI FIX</h1><div id="lobby" class="panel"><input id="name" placeholder="Ваше имя"><button id="createBtn">Создать комнату</button><input id="code" placeholder="FRISH-0000"><button id="joinBtn">Войти</button></div><div id="room" class="hidden"><div class="panel"><b>Комната <span id="roomCode"></span></b><div id="players"></div><button id="start" onclick="socket.emit('start')">НАЧАТЬ ПАРТИЮ</button></div><div id="screenNotice" class="hidden"></div><div id="game" class="hidden"><div id="allBanner" class="hidden" style="margin:8px auto;padding:12px 18px;max-width:520px;text-align:center;font-weight:900;font-size:22px;background:#f3c941;color:#111;border-radius:12px"></div><div class="top"><span class="panel status" id="meta"></span><span class="panel status" id="phase"></span></div><div class="gameLayout"><div class="boardCol"><div class="table"><div id="seats"></div><div class="center"><div id="cutUI" class="hidden"><b id="cutText"></b><div class="cutdeck" id="cutdeck"></div><small>Проведите пальцем/мышью по колоде. Через 7 секунд снятие выполнится автоматически.</small></div><div id="playUI" class="hidden"><div class="piles"><div><div class="card back" onclick="drawStock()"></div><span id="stockN"></span></div><div><small>СВЕТКА</small><div id="svetka"></div></div><div><small>СБРОС</small><div id="discard"></div></div></div><div class="melds" id="melds"></div></div></div><div class="hand" id="hand"></div></div><aside class="controlRail"><div class="controlTitle">ДЕЙСТВИЯ</div><div class="actions"><button class="actionPrimary" id="stockBtn" onclick="drawStock()">ВЗЯТЬ ИЗ КОЛОДЫ</button><button id="discardTakeBtn" onclick="drawDiscard()">ВЗЯТЬ СБРОС</button><button onclick="layMeld()">ВЫЛОЖИТЬ ТЕРЕЦ</button><button id="extendBtn" onclick="startExtend()">ПОДЛОЖИТЬ</button><button onclick="discardSelected()">СБРОСИТЬ</button></div><div class="global"><button onclick="declareAll()">ВСЕ</button><button onclick="openCheck()">ПРОВЕРКА</button><button onclick="toggleScore()">ТАБЛИЦА</button><button onclick="proposeFrish()">ФРИШ</button><button onclick="sayCard()">КАРТА</button></div></aside></div></div><div class="panel log" id="log"></div><div id="modal" class="hidden"></div></div></div><script src="/socket.io/socket.io.js"></script><script>
 const socket=io();let S=null,sel=new Set(),extendMode=false,extendTarget=null;const q=s=>document.querySelector(s);function createRoom(){socket.emit('create',q('#name').value)}function joinRoom(){socket.emit('join',{name:q('#name').value,code:q('#code').value})}q('#createBtn').addEventListener('click',createRoom);q('#joinBtn').addEventListener('click',joinRoom);socket.on('joined',x=>{q('#roomCode').textContent=x.code;q('#lobby').classList.add('hidden');q('#room').classList.remove('hidden')});socket.on('errorMsg',alert);socket.on('state',s=>{S=s;render()});function ct(c){return !c?'':c.rank==='JOKER'?'J\\nO\\nK\\nE\\nR':c.rank+c.suit}function ce(c,click=true){let d=document.createElement('div');d.className='card '+((c&&['♥','♦'].includes(c.suit))?'red':'');if(c&&c.rank==='JOKER'){d.textContent=ct(c);d.style.whiteSpace='pre-line';d.style.lineHeight='1.02';d.style.fontSize='12px';d.style.color=c.suit==='R'?'#c71919':'#111'}else if(c){const a=document.createElement('span'),b=document.createElement('span');a.className='corner tl';b.className='corner br';a.textContent=c.rank+c.suit;b.textContent=c.rank+c.suit;d.append(a,b)}if(c&&click){d.onclick=()=>{sel.has(c.id)?sel.delete(c.id):sel.add(c.id);render()};if(sel.has(c.id))d.classList.add('selected')}return d}function render(){if(!S)return;const sn=q('#screenNotice');if(S.screenNotice&&S.screenNotice.text){sn.textContent=S.screenNotice.text;sn.classList.remove('hidden')}else{sn.textContent='';sn.classList.add('hidden')};q('#roomCode').textContent=S.code;q('#players').innerHTML=S.players.map((p,i)=>(i+1)+'. '+(p?p.name+(p.bot?' · БОТ':''):'свободно')).join('<br>');q('#start').style.display=(!S.started&&S.myIndex===0)?'inline-block':'none';if(!S.started)return;q('#game').classList.remove('hidden');q('#meta').textContent='Раздача '+S.dealNo+' · ×'+S.mult+' · раздаёт '+S.players[S.dealer].name;q('#phase').textContent=(S.phase==='cut'||S.phase==='rebuild_cut')?'Снимает '+S.players[S.cutter].name:(S.phase==='finish_report'?'15 СЕКУНД НА ПРОВЕРКУ':'Ход: '+S.players[S.turn].name);
  const ab=q('#allBanner');const ai=(S.allDeclared||[]).findIndex(Boolean);
  if(S.phase==='finish_report'){ab.textContent=S.players[S.allFinisher].name+' ЗАКОНЧИЛ · 15 СЕКУНД НА ПРОВЕРКУ';ab.classList.remove('hidden')}
@@ -378,4 +447,4 @@ function toggleScore(){let names=S.players.map(p=>p.name);let rows='';for(let d=
 </script></body></html>`;
 
 app.get('/',(req,res)=>res.type('html').send(HTML));
-server.listen(PORT,()=>console.log('FRISH v0.9.2 RULE ENFORCEMENT on',PORT));
+server.listen(PORT,()=>console.log('FRISH v0.9.3 ALL PODLOZHKI FIX on',PORT));
