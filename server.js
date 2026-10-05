@@ -345,11 +345,11 @@ function botTurn(r,expectedSeat=r.turn,expectedEpoch=r.turnEpoch){
  if(r.phase!=='turn'||r.turn!==expectedSeat||r.turnEpoch!==expectedEpoch)return;
  const i=expectedSeat,p=r.players[i];if(!p||!p.bot||p.sid)return;
  if(i===r.dealer&&r.hands[i].length===15&&!r.discard.length){botArrangeHand(r,i);let k=botDiscardIndex(r,i);r.discard.push(r.hands[i].splice(k,1)[0]);addLog(r,`${r.players[i].name} сбросил карту`);autoCard(r,i);return endTurn(r)}
- let botDrawn=null;
+ let botDrawn=null,take=null;
  if(!r.drawn){
    if(!r.stock.length){startStockRebuild(r);return}
    // Prefer discard only before this turn has drawn anything.
-   const take=botUsefulTopDiscard(r,i);
+   take=botUsefulTopDiscard(r,i);
    if(take){botDrawn=r.discard.pop();r.hands[i].push(botDrawn);r.takenDiscardId[i]=botDrawn.id;addLog(r,`${r.players[i].name} взял ${cardText(botDrawn)} из сброса`)}
    else{botDrawn=botMaybeHelpfulDraw(r,i);r.hands[i].push(botDrawn);addLog(r,`${r.players[i].name} взял карту из колоды`)}
    r.drawn=true;
@@ -361,14 +361,20 @@ function botTurn(r,expectedSeat=r.turn,expectedEpoch=r.turnEpoch){
  const earlyJoker=!r.ran[i]&&r.hands[i].some(isJ)&&(r.botTurns?.[i]||0)<6;
  const finishPlan=botPlanFinish(r,i,run);
  if(finishPlan)return botFinishFromPlan(r,i,finishPlan);
- if(run&&(!earlyJoker||!!take)){for(const c of run.arr)botLay(r,i,c);r.ran[i]=true;r.runClaims[i]={points:run.pts,turnSerial:r.turnSerial};addLog(r,`${r.players[i].name} побежал: ${run.pts} очков`)}
+ const runCardCount=run?new Set(run.arr.flatMap(m=>m.cards.map(c=>c.id))).size:0;
+ // A normal run must still leave a card for the mandatory discard. A legal finish is handled above by botPlanFinish.
+ if(run&&r.hands[i].length-runCardCount>=2&&(!earlyJoker||!!take)){for(const c of run.arr)botLay(r,i,c);r.ran[i]=true;r.runClaims[i]={points:run.pts,turnSerial:r.turnSerial};addLog(r,`${r.players[i].name} побежал: ${run.pts} очков`)}
  if(r.ran[i])botUsePodlozhki(r,i);
  // If a discard was taken, it MUST have been used this turn. Do not silently throw it back.
  if(r.takenDiscardId[i]!=null&&r.hands[i].some(c=>c.id===r.takenDiscardId[i]))return applyZastrel(r,i,'взятая карта сброса не использована');
  // Re-check finish after every table change, especially after podlozhki.
  const lateFinish=botPlanFinish(r,i,null);if(lateFinish)return botFinishFromPlan(r,i,lateFinish);
- if(r.hands[i].length<=1){if(r.hands[i].length===1&&(r.dealTurns||0)>=5){r.allDeclared[i]=true;addLog(r,`${r.players[i].name} — ВСЕ`);notice(r,`${r.players[i].name} — ВСЕ`,5000);const c=r.hands[i].splice(0,1)[0];r.discard.push(c);addLog(r,`${r.players[i].name} сделал финальный сброс`);return beginFinishReport(r,i,'ordinary')}return}
- botUsePodlozhki(r,i);botArrangeHand(r,i);let k=botDiscardIndex(r,i);if(r.hands[i].length<=1)return;
+ // Safety invariant: outside a pre-planned ВСЕ finish the bot must never reach the discard step with <=1 card.
+ // Do not leave turn ownership parked on the bot: fail the illegal bot state explicitly instead of bare-returning forever.
+ if(r.hands[i].length<=1)return applyZastrel(r,i,'бот не оставил карту для обязательного сброса');
+ botUsePodlozhki(r,i);botArrangeHand(r,i);
+ if(r.hands[i].length<=1)return applyZastrel(r,i,'бот не оставил карту для обязательного сброса');
+ let k=botDiscardIndex(r,i);
  r.discard.push(r.hands[i].splice(k,1)[0]);addLog(r,`${r.players[i].name} сбросил карту`);autoCard(r,i);endTurn(r);
 }
 function legacyValidMeld_UNUSED(cs){if(cs.length<3)return false;const real=cs.filter(c=>!isJ(c));if(!real.length)return false;const sameRank=real.every(c=>c.rank===real[0].rank)&&new Set(real.map(c=>c.suit)).size===real.length&&cs.length<=4;if(sameRank)return true;if(cs.filter(isJ).length)return false;if(!real.every(c=>c.suit===real[0].suit))return false;const idx=real.map(c=>RANKS.indexOf(c.rank));return idx.every((v,k)=>k===0||v===idx[k-1]+1)}
