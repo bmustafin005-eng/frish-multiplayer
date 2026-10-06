@@ -307,90 +307,76 @@ function botProtectedHandIds(r,i){
  return protectedIds;
 }
 function botArrangeHand(r,i){
- // v1.7.1 — HUMAN HAND ORDER.
- // The bot/autopilot must arrange the hand the same way a player does:
- // 1) best COMPLETE terets on the left (same-rank terets win ties over short suit runs);
- // 2) unfinished same-suit consecutive chains of 2+ cards, high -> low;
- // 3) same-rank pairs; 4) remaining singles high -> low.
- // IMPORTANT: this changes r.hands[i] itself, so the order survives resumeSession after minimizing the game.
+ // v1.7.3 — DYNAMIC HUMAN HAND ORDER.
+ // This is NOT a meld planner. JOKER is never inserted into a prospective group here.
+ // We arrange ordinary cards by the strongest visible links a human uses while waiting for draws:
+ // same rank <-> same-suit neighbours <-> one-card gaps. A card may bridge both ideas,
+ // e.g. 10♦ 10♦ 10♣ 9♣ ... and 6♦ 5♦ 5♣.
  const hand=r.hands[i]||[];if(hand.length<2)return;
  const originalPos=new Map(hand.map((c,n)=>[c.id,n]));
- const rankNo=c=>isJ(c)?999:RANKS.indexOf(c.rank);
- const suitNo=c=>isJ(c)?999:SUITS.indexOf(c.suit);
- const normalizeMeld=g=>{
-   const cards=[...g.cards];
-   if(g.v&&g.v.type==='RUN')cards.sort((a,b)=>rankNo(a)-rankNo(b)||originalPos.get(a.id)-originalPos.get(b.id));
-   else if(g.v&&g.v.type==='SAME_RANK')cards.sort((a,b)=>suitNo(a)-suitNo(b)||originalPos.get(a.id)-originalPos.get(b.id));
-   return {...g,cards};
- };
- const candidates=botCandidateMelds(r,i).slice(0,96).map(normalizeMeld);
- // 15 cards max, so a 32-bit mask is safe. Optimize covered cards first; on equal coverage
- // prefer same-rank terets. This prevents e.g. 4♣-3♣-2♣ from breaking a ready 3♠-3♦-3♣.
- const bitOf=new Map(hand.map((c,n)=>[c.id,(1<<n)]));
- const cm=candidates.map(g=>({g,mask:g.cards.reduce((m,c)=>m|(bitOf.get(c.id)||0),0),count:g.cards.length,
-   same:(g.v&&g.v.type==='SAME_RANK')?1:0,longRun:(g.v&&g.v.type==='RUN')?g.cards.length:0,pts:g.pts||0}));
- const memo=new Map();
- function better(a,b){
-   if(a.count!==b.count)return a.count>b.count;
-   if(a.same!==b.same)return a.same>b.same;
-   if(a.longRun!==b.longRun)return a.longRun>b.longRun;
-   return a.pts>b.pts;
- }
- function solve(pos,mask){
-   const key=pos+':'+mask;if(memo.has(key))return memo.get(key);
-   let best={groups:[],count:0,same:0,longRun:0,pts:0};
-   for(let x=pos;x<cm.length;x++){
-     const z=cm[x];if(mask&z.mask)continue;
-     const tail=solve(x+1,mask|z.mask);
-     const cur={groups:[z.g,...tail.groups],count:z.count+tail.count,same:z.same+tail.same,longRun:z.longRun+tail.longRun,pts:z.pts+tail.pts};
-     if(better(cur,best))best=cur;
+ const rankNo=c=>RANKS.indexOf(c.rank);
+ const suitNo=c=>SUITS.indexOf(c.suit);
+ const jokers=hand.filter(isJ);
+ const cards=hand.filter(c=>!isJ(c));
+ if(!cards.length){r.hands[i]=[...jokers];return}
+
+ // A directional adjacency score. The small direction bonus makes suit sequences read
+ // from high to low. Same-rank links and suit links are deliberately comparable so a
+ // card such as 10♣ can sit between the other tens and 9♣.
+ function link(a,b){
+   const ra=rankNo(a),rb=rankNo(b),d=rb-ra;
+   let sc=0;
+   if(a.rank===b.rank){
+     sc+=(a.suit===b.suit?118:132); // duplicate exact cards stay together too
    }
-   memo.set(key,best);return best;
- }
- const best=solve(0,0),ordered=[],used=new Set();
- best.groups.sort((a,b)=>{
-   const at=a.v&&a.v.type==='SAME_RANK',bt=b.v&&b.v.type==='SAME_RANK';
-   if(at!==bt)return at?-1:1;
-   return b.cards.length-a.cards.length||(a.cards.length?rankNo(a.cards[0])-rankNo(b.cards[0]):0);
- });
- for(const g of best.groups)for(const c of g.cards)if(!used.has(c.id)){ordered.push(c);used.add(c.id)}
-
- // Find ALL remaining adjacent same-suit chains. Duplicate copies of the same exact card do not
- // break a chain; only one copy participates and the spare stays available for another group.
- const chains=[];
- for(const suit of SUITS){
-   const pool=hand.filter(c=>!used.has(c.id)&&!isJ(c)&&c.suit===suit)
-     .sort((a,b)=>rankNo(a)-rankNo(b)||originalPos.get(a.id)-originalPos.get(b.id));
-   let chain=[];
-   const flush=()=>{if(chain.length>=2){chains.push([...chain]);for(const c of chain)used.add(c.id)}chain=[]};
-   for(const c of pool){
-     if(used.has(c.id))continue;
-     if(!chain.length){chain=[c];continue}
-     const d=rankNo(c)-rankNo(chain[chain.length-1]);
-     if(d===1)chain.push(c);
-     else if(d===0)continue;
-     else{flush();chain=[c]}
+   if(a.suit===b.suit){
+     const ad=Math.abs(d);
+     if(ad===1)sc+=128+(d===1?10:-18);      // direct length continuation
+     else if(ad===2)sc+=72+(d===2?8:-14);  // one missing card: e.g. 9♣ ... 7♣
+     else if(ad===3)sc+=20+(d===3?3:-6);
    }
-   flush();
+   return sc;
  }
- chains.sort((a,b)=>b.length-a.length||rankNo(a[0])-rankNo(b[0])||suitNo(a[0])-suitNo(b[0]));
- for(const g of chains)for(const c of g)ordered.push(c);
-
- // Prospective same-rank groups. Keep every useful pair together, but do not steal cards already
- // placed in a stronger suit chain. Distinct suits are preferred; duplicate copies follow them.
- for(const rank of RANKS){
-   const grp=hand.filter(c=>!used.has(c.id)&&!isJ(c)&&c.rank===rank)
-     .sort((a,b)=>suitNo(a)-suitNo(b)||originalPos.get(a.id)-originalPos.get(b.id));
-   if(grp.length>=2){for(const c of grp){ordered.push(c);used.add(c.id)}}
+ function startScore(c){
+   // On equal solutions prefer higher cards at the left edge.
+   return (RANKS.length-rankNo(c))*0.02-(originalPos.get(c.id)||0)*0.0001;
  }
 
- // Singles. This is the visual fallback only; it does not change meld legality.
- const singles=hand.filter(c=>!used.has(c.id)&&!isJ(c))
-   .sort((a,b)=>rankNo(a)-rankNo(b)||suitNo(a)-suitNo(b)||originalPos.get(a.id)-originalPos.get(b.id));
- for(const c of singles){ordered.push(c);used.add(c.id)}
- // A loose JOKER stays visible at the right until a legal plan actually uses it.
- for(const c of hand)if(!used.has(c.id)&&isJ(c)){ordered.push(c);used.add(c.id)}
- if(ordered.length===hand.length)r.hands[i]=ordered;
+ // Exact maximum-link path for a normal FRISH hand (<=15 cards). This lets one card
+ // participate in two neighbouring ideas instead of putting the whole hand into rigid buckets.
+ const n=cards.length;
+ if(n<=18){
+   const N=1<<n,neg=-1e15;
+   const dp=Array.from({length:N},()=>new Float64Array(n));
+   const prev=Array.from({length:N},()=>new Int16Array(n));
+   for(let m=0;m<N;m++)for(let j=0;j<n;j++){dp[m][j]=neg;prev[m][j]=-1}
+   for(let j=0;j<n;j++)dp[1<<j][j]=startScore(cards[j]);
+   for(let mask=1;mask<N;mask++){
+     for(let last=0;last<n;last++){
+       const base=dp[mask][last];if(base<=neg/2)continue;
+       for(let nx=0;nx<n;nx++){
+         if(mask&(1<<nx))continue;
+         const nm=mask|(1<<nx);
+         const val=base+link(cards[last],cards[nx]);
+         if(val>dp[nm][nx]+1e-9){dp[nm][nx]=val;prev[nm][nx]=last}
+       }
+     }
+   }
+   const full=N-1;let last=0;
+   for(let j=1;j<n;j++)if(dp[full][j]>dp[full][last])last=j;
+   const rev=[];let mask=full;
+   while(last>=0){rev.push(cards[last]);const pl=prev[mask][last];mask^=1<<last;last=pl}
+   rev.reverse();
+
+   // A loose JOKER is deliberately standalone. It is not treated as a substitute during sorting.
+   // Keep it at the far left where it is clearly separate from the prospective groups.
+   r.hands[i]=[...jokers,...rev];
+   return;
+ }
+
+ // Defensive fallback for an unexpectedly large hand.
+ cards.sort((a,b)=>rankNo(a)-rankNo(b)||suitNo(a)-suitNo(b)||originalPos.get(a.id)-originalPos.get(b.id));
+ r.hands[i]=[...jokers,...cards];
 }
 
 function botDiscardIndex(r,i){
@@ -980,7 +966,7 @@ html.appFullscreen #game,body.appFullscreen #game{height:auto!important;min-heig
 #frishVoteOverlay.on{display:flex!important;visibility:visible!important;opacity:1!important;pointer-events:auto!important;z-index:2147483647!important}
 #frishVoteOverlay.on #frishVoteBox{display:block!important;visibility:visible!important;pointer-events:auto!important}
 #frishVoteOverlay.on button{display:block!important;visibility:visible!important;pointer-events:auto!important}
-</style></head><body><div class="wrap"><h1>ФРИШ · Multiplayer v1.7.2 RESUME SORT FIX</h1><div id="lobby" class="panel"><input id="name" placeholder="Ваше имя"><button id="createBtn">Создать комнату</button><input id="code" placeholder="FRISH-0000"><button id="joinBtn">Войти</button></div><div id="room" class="hidden"><div class="panel"><b>Комната <span id="roomCode"></span></b><div id="players"></div><label>Ставка: <input id="bet" type="number" min="1" value="10" style="width:110px"> монет/очко</label><button id="start" onclick="startMatch()">ВЫТЯНУТЬ МАСТИ И НАЧАТЬ</button></div><div id="screenNotice" class="hidden"></div><div id="seatDraw" class="hidden"></div><div id="game" class="hidden"><div id="multNotice" class="multNotice hidden"></div><div id="allBanner" class="hidden" style="margin:8px auto;padding:12px 18px;max-width:520px;text-align:center;font-weight:900;font-size:22px;background:#f3c941;color:#111;border-radius:12px"></div><div class="top mobileTop"><span class="panel status" id="phase"></span><div class="topIcons"><button class="iconQuick" onclick="toggleScore()" title="Таблица">▦</button><button class="fullQuick iconQuick" id="fullBtn" onclick="toggleFullscreen()" title="Полный экран">⛶</button></div><span id="meta" class="hidden"></span></div><div class="gameLayout"><div class="boardCol"><div class="table"><div id="seats"></div><div class="center"><div id="cutUI" class="hidden"><b id="cutText"></b><div class="cutdeck" id="cutdeck"></div><small>Проведите пальцем/мышью по колоде. Через 7 секунд снятие выполнится автоматически.</small></div><div id="playUI" class="hidden"><div class="piles"><div><div class="card back premiumBack" aria-label="Колода" onclick="drawStock()"></div><span id="stockN"></span></div><div><small>СВЕТКА</small><div id="svetka"></div></div><div><small>СБРОС</small><div id="discard"></div></div></div><div class="melds" id="melds"></div></div></div><div class="hand" id="hand"></div><div class="dragHint">Выберите карты и перетащите их на стол; для подложки — на нужный терец.</div></div><aside class="controlRail"><div class="controlTitle">ДЕЙСТВИЯ</div><div class="actions"><button class="actionPrimary" id="stockBtn" onclick="drawStock()">ВЗЯТЬ ИЗ КОЛОДЫ</button><button id="discardTakeBtn" onclick="drawDiscard()">ВЗЯТЬ СБРОС</button><button id="discardBtn" class="actionPrimary" onclick="discardSelected()">СБРОСИТЬ</button><button id="swapSvetkaBtn" onclick="swapSvetka()">ЗАМЕНИТЬ СВЕТКУ</button><button id="undoBtn" onclick="undoTurn()">ОТМЕНИТЬ</button></div><div class="global"><button onclick="declareAll()">ВСЕ</button><button onclick="toggleMore()">ЕЩЁ</button><div id="moreActions" class="hidden"><button id="reclaimBtn" onclick="startReclaim()">ЗАБРАТЬ JOKER</button><button onclick="openCheck()">ПРОВЕРКА</button><button onclick="proposeFrish()">ФРИШ</button></div><button onclick="sayCard()">КАРТА</button></div></aside></div></div><div class="panel log hidden" id="log"></div><div id="modal" class="hidden"></div></div></div><script src="/socket.io/socket.io.js"></script><script>
+</style></head><body><div class="wrap"><h1>ФРИШ · Multiplayer v1.7.3 DYNAMIC HAND SORT</h1><div id="lobby" class="panel"><input id="name" placeholder="Ваше имя"><button id="createBtn">Создать комнату</button><input id="code" placeholder="FRISH-0000"><button id="joinBtn">Войти</button></div><div id="room" class="hidden"><div class="panel"><b>Комната <span id="roomCode"></span></b><div id="players"></div><label>Ставка: <input id="bet" type="number" min="1" value="10" style="width:110px"> монет/очко</label><button id="start" onclick="startMatch()">ВЫТЯНУТЬ МАСТИ И НАЧАТЬ</button></div><div id="screenNotice" class="hidden"></div><div id="seatDraw" class="hidden"></div><div id="game" class="hidden"><div id="multNotice" class="multNotice hidden"></div><div id="allBanner" class="hidden" style="margin:8px auto;padding:12px 18px;max-width:520px;text-align:center;font-weight:900;font-size:22px;background:#f3c941;color:#111;border-radius:12px"></div><div class="top mobileTop"><span class="panel status" id="phase"></span><div class="topIcons"><button class="iconQuick" onclick="toggleScore()" title="Таблица">▦</button><button class="fullQuick iconQuick" id="fullBtn" onclick="toggleFullscreen()" title="Полный экран">⛶</button></div><span id="meta" class="hidden"></span></div><div class="gameLayout"><div class="boardCol"><div class="table"><div id="seats"></div><div class="center"><div id="cutUI" class="hidden"><b id="cutText"></b><div class="cutdeck" id="cutdeck"></div><small>Проведите пальцем/мышью по колоде. Через 7 секунд снятие выполнится автоматически.</small></div><div id="playUI" class="hidden"><div class="piles"><div><div class="card back premiumBack" aria-label="Колода" onclick="drawStock()"></div><span id="stockN"></span></div><div><small>СВЕТКА</small><div id="svetka"></div></div><div><small>СБРОС</small><div id="discard"></div></div></div><div class="melds" id="melds"></div></div></div><div class="hand" id="hand"></div><div class="dragHint">Выберите карты и перетащите их на стол; для подложки — на нужный терец.</div></div><aside class="controlRail"><div class="controlTitle">ДЕЙСТВИЯ</div><div class="actions"><button class="actionPrimary" id="stockBtn" onclick="drawStock()">ВЗЯТЬ ИЗ КОЛОДЫ</button><button id="discardTakeBtn" onclick="drawDiscard()">ВЗЯТЬ СБРОС</button><button id="discardBtn" class="actionPrimary" onclick="discardSelected()">СБРОСИТЬ</button><button id="swapSvetkaBtn" onclick="swapSvetka()">ЗАМЕНИТЬ СВЕТКУ</button><button id="undoBtn" onclick="undoTurn()">ОТМЕНИТЬ</button></div><div class="global"><button onclick="declareAll()">ВСЕ</button><button onclick="toggleMore()">ЕЩЁ</button><div id="moreActions" class="hidden"><button id="reclaimBtn" onclick="startReclaim()">ЗАБРАТЬ JOKER</button><button onclick="openCheck()">ПРОВЕРКА</button><button onclick="proposeFrish()">ФРИШ</button></div><button onclick="sayCard()">КАРТА</button></div></aside></div></div><div class="panel log hidden" id="log"></div><div id="modal" class="hidden"></div></div></div><script src="/socket.io/socket.io.js"></script><script>
 const JOKER_RED_CLIENT='${JOKER_RED_DATA}';const JOKER_BLACK_CLIENT='${JOKER_BLACK_DATA}';const socket=io();
 const FRISH_RESUME_KEY='frish_resume_token_v1';
 function savedResumeToken(){try{return localStorage.getItem(FRISH_RESUME_KEY)||''}catch(e){return ''}}
